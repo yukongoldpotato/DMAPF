@@ -67,14 +67,14 @@ struct GridView: View {
 
             guard let cellPath = grid.aStarPath(from: startCell, to: endCell) else { return }
 
-            let newPathIndicies = cellPath.map { cell in
+            let newPathIndices = cellPath.map { cell in
                 cell.y * grid.size + cell.x
             }
 
-            for index in newPathIndicies where index != startIndex && index != endIndex {
+            for index in newPathIndices where index != startIndex && index != endIndex {
                 grid.cells[index].cellState = .path
             }
-            pathIndices = newPathIndicies
+            pathIndices = newPathIndices
         }
         .padding(.vertical)
 
