@@ -9,9 +9,10 @@ import SwiftUI
 
 @main
 struct DMAPFApp: App {
+    
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            GridView()
         }
     }
 }
