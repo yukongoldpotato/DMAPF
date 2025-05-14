@@ -1,47 +1,11 @@
 //
-//  GridCell.swift
+//  MapGrid.swift
 //  DMAPF
 //
-//  Created by Kazuki Minami on 2025/04/29.
+//  Created by Kazuki Minami on 2025/05/14.
 //
 
-
 import Foundation
-import SwiftUI
-
-struct TimedCell: Hashable {
-    let cell: Cell   /// spatial location
-    let t: Int       /// discrete time
-}
-
-struct Agent {
-    let id: Int
-    let start: Cell
-    let goal: Cell
-}
-
-enum CellState {
-    case empty, occupied, start, end, path
-
-    var color: Color {
-        switch self {
-        case .empty:
-            return .white
-        case .occupied:
-            return .blue
-        case .path:
-            return .yellow
-        default:
-            return .teal
-        }
-    }
-}
-
-struct Cell: Hashable {
-    var x: Int
-    var y: Int
-    var cellState: CellState
-}
 
 struct MapGrid {
     let size: Int
@@ -56,8 +20,6 @@ struct MapGrid {
         }
     }
 }
-
-typealias Reservation = [Int : Set<Cell>]
 
 extension MapGrid {
     func getNeighbors(of cell: Cell) -> [Cell] {
@@ -75,7 +37,8 @@ extension MapGrid {
             if neighborRow >= 0 && neighborRow < size && neighborCol >= 0 && neighborCol < size {
                 let location = neighborRow * size + neighborCol
                 let neighborNode = cells[location]
-                if neighborNode.cellState != .occupied && neighborNode.cellState != .path {
+                // Traversable unless blocked by agent or obstacle
+                if neighborNode.cellState != .occupied && neighborNode.cellState != .obstacle {
                     neighbors.append(neighborNode)
                 }
             }
@@ -155,83 +118,4 @@ extension MapGrid {
         // 3. No Path Found
         return nil
     }
-
-    /// Time‑expanded neighbours for multi‑agent planning.
-    /// Returns up / down / left / right moves **plus "wait"** that are free
-    /// in the reservation table at (t + 1).
-    func getTimedNeighbors(of node: TimedCell, reserved: Reservation) -> [TimedCell] {
-        var next: [TimedCell] = []
-        // spatial moves
-        let base = getNeighbors(of: node.cell) + [node.cell] // include 'wait'
-        let nextTime = node.t + 1
-        for c in base {
-            // skip if another agent already occupies the cell at nextTime
-            if reserved[nextTime]?.contains(c) == true { continue }
-            // prevent head‑on swap: reserve both directions
-            if reserved[nextTime]?.contains(where: { reservedCell in
-                reservedCell == c
-            }) == true { continue }
-            next.append(TimedCell(cell: c, t: nextTime))
-        }
-        return next
-    }
-    /// Time‑aware A* that respects a global reservation table.
-    /// On success it *writes* the path into `reserved`.
-    func aStarPathTimed(from start: Cell,
-                        to goal: Cell,
-                        reserved: inout Reservation) -> [Cell]? {
-
-        let startNode = TimedCell(cell: start, t: 0)
-
-        var open: [TimedCell] = [startNode]
-        var closed: Set<TimedCell> = []
-        var cameFrom: [TimedCell: TimedCell] = [:]
-        var gScore: [TimedCell: Int] = [startNode: 0]
-        var fScore: [TimedCell: Int] = [startNode: heuristic(start, goal)]
-
-        while !open.isEmpty {
-            guard let current = open.min(by: {
-                fScore[$0, default: .max] < fScore[$1, default: .max]
-            }) else { return nil }
-
-            // goal reached when spatial cell matches
-            if current.cell == goal {
-                // reconstruct
-                var nodes: [TimedCell] = [current]
-                var n = current
-                while let prev = cameFrom[n] {
-                    nodes.append(prev)
-                    n = prev
-                }
-                let path = nodes.reversed().map { $0.cell }
-                // write reservations
-                for (step, c) in path.enumerated() {
-                    reserved[step, default: []].insert(c)
-                }
-                return path
-            }
-
-            // move current from open to closed
-            open.removeAll(where: { $0 == current })
-            closed.insert(current)
-
-            for neighbor in getTimedNeighbors(of: current, reserved: reserved) {
-                if closed.contains(neighbor) { continue }
-
-                let tentativeG = gScore[current, default: .max] + 1
-                let notInOpen = !open.contains(neighbor)
-
-                if notInOpen || tentativeG < gScore[neighbor, default: .max] {
-                    cameFrom[neighbor] = current
-                    gScore[neighbor] = tentativeG
-                    fScore[neighbor] = tentativeG + heuristic(neighbor.cell, goal)
-                    if notInOpen {
-                        open.append(neighbor)
-                    }
-                }
-            }
-        }
-        return nil  // no path
-    }
-
 }

@@ -10,14 +10,19 @@ import SwiftUI
 struct GridView: View {
     @State private var showIndex: Bool = false
     @State var grid = MapGrid(size: 12)
-    @State private var selectedState: CellState = .occupied
-    @State private var pathIndices: [Int] = []
-    @State private var agent1CurrentIndex: Int? = nil
-    @State private var agent1TargetIndex: Int? = nil
-    @State private var agent1PathIndices: [Int] = []
-    @State private var reservations: Reservation = [:]   // global reservation table
+    @State private var agents: [Agent] = []
+    @State private var agentPaths: [Int : [Cell]] = [:]
+    @State private var agentProgress: [Int : Int] = [:]   // tracks the step each agent is on
+    @State private var pendingStart: Int? = nil           // tap‑to‑place helper
+
     private let cellSize: CGFloat = 45
     private let spacing: CGFloat = 2
+
+    @State private var simulationRunning: Bool = false
+    @State private var currentTick: Int = 0
+
+    /// Fires every 0.5 s; drives the turn‑based animation
+    private let tickTimer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack {
@@ -26,18 +31,24 @@ struct GridView: View {
             }
 
             HStack {
-                Button("Agent 1") {
-                    randomizeAgent()
+                Button("Add Agent") { addRandomAgent() }
+                Button("Plan All")  { planAll() }
+                Button(simulationRunning ? "Stop" : "Run") {
+                    if simulationRunning {
+                        // Stop
+                        simulationRunning = false
+                    } else {
+                        // Start
+                        if agentPaths.isEmpty {
+                            planAll()            // auto‑plan if nothing planned yet
+                        }
+                        currentTick = 0
+                        simulationRunning = true
+                    }
                 }
-                .padding(.vertical)
             }
+            .padding(.vertical)
 
-            HStack {
-                Button("Path 1") {
-                    calculatePath()
-                }
-                .padding(.vertical)
-            }
             Grid(horizontalSpacing: spacing, verticalSpacing: spacing) {
                 ForEach(0..<grid.size, id: \.self) { row in
                     GridRow {
@@ -47,7 +58,6 @@ struct GridView: View {
                             Rectangle()
                                 .stroke(Color.gray, lineWidth: 1)
                                 .fill(cell.cellState.color)
-                                .frame(width: cellSize, height: cellSize)
                                 .overlay {
                                     if cell.cellState == .end {
                                         Text("End")
@@ -61,6 +71,10 @@ struct GridView: View {
                                             .font(.caption)
                                     }
                                 }
+                                .onTapGesture {
+                                    placeAgent(at: index)
+                                }
+                                .frame(width: cellSize, height: cellSize)
                         }
                     }
                 }
@@ -77,76 +91,193 @@ struct GridView: View {
                               (0..<grid.size).contains(row)
                         else { return }
                         let swipeIndex = row * grid.size + col
-                        if grid.cells[swipeIndex].cellState != .occupied {
-                            grid.cells[swipeIndex].cellState = .occupied
+                        if grid.cells[swipeIndex].cellState == .empty {
+                            grid.cells[swipeIndex].cellState = .obstacle
                         }
                     }
             )
-
-        }
-    }
-
-    func reset(){
-        for i in grid.cells.indices {
-            grid.cells[i].cellState = .empty
-        }
-        pathIndices.removeAll()
-        pathIndices.removeAll()
-        agent1PathIndices.removeAll()
-        reservations.removeAll()
-    }
-
-    func calculatePath() {
-        for idx in pathIndices {
-            if grid.cells[idx].cellState == .path {
-                grid.cells[idx].cellState = .empty
+            .onReceive(tickTimer) { _ in
+                guard simulationRunning else { return }
+                advanceOneTick()
             }
-        }
-        pathIndices.removeAll()
-        guard let startIndex = grid.cells.firstIndex(where: { $0.cellState == .start }),
-              let endIndex = grid.cells.firstIndex(where: { $0.cellState == .end }) else { return }
-        let startCell = grid.cells[startIndex]
-        let endCell = grid.cells[endIndex]
 
-        guard let cellPath = grid.aStarPathTimed(from: startCell, to: endCell, reserved: &reservations) else { return }
-
-        let newPathIndices = cellPath.map { cell in
-            cell.y * grid.size + cell.x
         }
-
-        for index in newPathIndices where index != startIndex && index != endIndex {
-            grid.cells[index].cellState = .path
-        }
-        pathIndices = newPathIndices
     }
 
-    func randomizeAgent() {
+    func reset() {
+        for i in grid.cells.indices { grid.cells[i].cellState = .empty }
+        agents.removeAll()
+        agentPaths.removeAll()
+        agentProgress.removeAll()
+        pendingStart = nil
+    }
+
+    /// Adds one agent with random start / goal
+    func addRandomAgent() {
         let total = grid.size * grid.size
-        var allIndices = Array(0..<total)
-        // Clear existing agent1 start/end
-        for i in 0..<total {
-            if grid.cells[i].cellState == .start || grid.cells[i].cellState == .end {
-                grid.cells[i].cellState = .empty
+        let free = grid.cells.indices.filter { grid.cells[$0].cellState == .empty }
+
+        guard free.count > 10 else { return } // not enough space
+
+        let start = free.randomElement()!
+        // choose a goal at least 3 chebyshev cells away
+        let goalCandidates = free.filter { idx in
+            let dr = abs(idx / grid.size - start / grid.size)
+            let dc = abs(idx % grid.size - start % grid.size)
+            return max(dr, dc) >= 3 && idx != start
+        }
+        guard let goal = goalCandidates.randomElement() else { return }
+
+        let id = (agents.last?.id ?? 0) + 1
+        agents.append(Agent(id: id, start: start, goal: goal))
+
+        grid.cells[start].cellState = .start
+        grid.cells[goal].cellState = .end
+        
+        // Initialize agent count at start position
+        grid.cells[start].agentCount += 1
+    }
+
+    /// Manually create an agent by tapping: first tap = start, second tap = goal
+    private func placeAgent(at index: Int) {
+        // require empty cell for either selection
+        guard grid.cells[index].cellState == .empty else { return }
+
+        if let start = pendingStart {
+            // second tap → goal
+            let id = (agents.last?.id ?? 0) + 1
+            agents.append(Agent(id: id, start: start, goal: index))
+            grid.cells[start].cellState = .start
+            grid.cells[index].cellState = .end
+            
+            // Initialize agent count at start position
+            grid.cells[start].agentCount += 1
+            pendingStart = nil
+        } else {
+            // first tap → start
+            pendingStart = index
+            grid.cells[index].cellState = .start
+        }
+    }
+
+    /// Plans paths for every agent in order of insertion
+    func planAll() {
+        // clear previous path cells
+        for nodes in agentPaths.values {
+            for n in nodes {
+                let idx = n.flatIndex(gridSize: grid.size)
+                if grid.cells[idx].cellState == .path {
+                    grid.cells[idx].cellState = .empty
+                }
             }
         }
-        // Pick a random start index
-        let startIndex = allIndices.randomElement()!
-        let startRow = startIndex / grid.size
-        let startCol = startIndex % grid.size
+        agentPaths.removeAll()
 
-        // Filter end candidates at least 3 cells away (Chebyshev distance)
-        let endCandidates = allIndices.filter { idx in
-            let row = idx / grid.size
-            let col = idx % grid.size
-            let dr = abs(row - startRow)
-            let dc = abs(col - startCol)
-            return max(dr, dc) >= 3
+        for agent in agents {
+            let startCell = grid.cells[agent.start]
+            let goalCell  = grid.cells[agent.goal]
+
+            if let nodes = grid.aStarPath(from: startCell,
+                                               to: goalCell) {
+                agentPaths[agent.id] = nodes
+                agentProgress[agent.id] = 0
+                for n in nodes where n != startCell && n != goalCell {
+                    let idx = n.flatIndex(gridSize: grid.size)
+                    grid.cells[idx].cellState = .path
+                }
+            }
         }
-        guard let endIndex = endCandidates.randomElement() else { return }
-
-        grid.cells[startIndex].cellState = .start
-        grid.cells[endIndex].cellState = .end
     }
+    /// Recalculate a fresh path for every agent on every tick, then move each agent one step.
+    private func advanceOneTick() {
+        var anyMoved = false
+
+        // 1. Remove previous path‑only markings so we can draw new ones
+        for idx in grid.cells.indices where grid.cells[idx].cellState == .path {
+            grid.cells[idx].cellState = .empty
+        }
+
+        for agent in agents {
+
+            // --- locate this agent’s current position
+            let currentCell: Cell
+            if let nodes = agentPaths[agent.id],
+               let progress = agentProgress[agent.id],
+               !nodes.isEmpty
+            {
+                currentCell = nodes[min(progress, nodes.count - 1)]
+            } else {
+                currentCell = grid.cells[agent.start]
+            }
+
+            // Already at goal?
+            if currentCell.flatIndex(gridSize: grid.size) == agent.goal { continue }
+
+            // --- temporarily mark every other agent’s position as occupied for planning
+            var reverted: [(idx: Int, old: CellState)] = []
+            for other in agents where other.id != agent.id {
+                if let otherNodes = agentPaths[other.id],
+                   let otherProg  = agentProgress[other.id] {
+                    let otherPos   = otherNodes[min(otherProg, otherNodes.count - 1)]
+                    let oIdx       = otherPos.flatIndex(gridSize: grid.size)
+                    if grid.cells[oIdx].cellState != .occupied {
+                        reverted.append((oIdx, grid.cells[oIdx].cellState))
+                        grid.cells[oIdx].cellState = .occupied
+                    }
+                }
+            }
+
+            // --- plan a brand‑new path
+            let goalCell = grid.cells[agent.goal]
+            guard let newPath = grid.aStarPath(from: currentCell, to: goalCell),
+                  newPath.count >= 2 else {
+                // restore temp changes and continue
+                for (idx, old) in reverted { grid.cells[idx].cellState = old }
+                continue
+            }
+
+            // --- draw the new path
+            for n in newPath where n != currentCell && n != goalCell {
+                let idx = n.flatIndex(gridSize: grid.size)
+                if grid.cells[idx].cellState == .empty {
+                    grid.cells[idx].cellState = .path
+                }
+            }
+
+            // --- store the path and reset progress
+            agentPaths[agent.id]    = newPath
+            agentProgress[agent.id] = 0
+
+            // --- attempt to move one step
+            let nextCell = newPath[1]
+            let nextIdx  = nextCell.flatIndex(gridSize: grid.size)
+
+            if grid.cells[nextIdx].cellState != .occupied &&
+               grid.cells[nextIdx].cellState != .obstacle {
+
+                // free the current cell (unless it’s a start/end marker)
+                let currentIdx = currentCell.flatIndex(gridSize: grid.size)
+                if grid.cells[currentIdx].cellState == .occupied {
+                    grid.cells[currentIdx].cellState = .path
+                }
+
+                // occupy the next cell (unless it’s explicitly an end marker)
+                if grid.cells[nextIdx].cellState != .end {
+                    grid.cells[nextIdx].cellState = .occupied
+                }
+
+                agentProgress[agent.id] = 1   // moved to step 1 of new path
+                anyMoved = true
+            }
+
+            // --- restore temporarily‑changed cells
+            for (idx, old) in reverted { grid.cells[idx].cellState = old }
+        }
+
+        currentTick += 1
+        if !anyMoved { simulationRunning = false }
+    }
+
 }
 
 #Preview {
